@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sva-oauth-client"
+version = "1.0.0"
+description = "Django package for integrating SVA (Secure Vault Authentication) OAuth provider"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "SVA Team", email = "support@getsva.com"}
+]
+keywords = ["oauth", "oauth2", "django", "sva", "authentication", "identity"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Framework :: Django",
+]
+
+dependencies = [
+    "Django>=3.2",
+    "requests>=2.25.0",
+    "PyJWT>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-django>=4.5.0",
+    "black>=22.0.0",
+    "flake8>=4.0.0",
+]
+
+[tool.setuptools]
+packages = ["sva_oauth_client"]
+
+[tool.setuptools.package-data]
+sva_oauth_client = ["templates/**/*"]
+
