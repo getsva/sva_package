@@ -81,6 +81,11 @@ def get_sva_claims(request: HttpRequest) -> Optional[Dict[str, Any]]:
     # Get algorithm from settings (default to HS256)
     data_token_algorithm = getattr(settings, 'SVA_DATA_TOKEN_ALGORITHM', 'HS256')
     
+    # Log configuration for debugging (without exposing the secret)
+    logger.debug(f"Attempting to decode data_token with algorithm: {data_token_algorithm}")
+    logger.debug(f"Data token length: {len(data_token) if data_token else 0}")
+    logger.debug(f"Secret configured: {'Yes' if data_token_secret else 'No'} (length: {len(data_token_secret) if data_token_secret else 0})")
+    
     try:
         # Decode and verify JWT
         # Verify signature and expiration, but not audience
@@ -103,6 +108,13 @@ def get_sva_claims(request: HttpRequest) -> Optional[Dict[str, Any]]:
     except jwt.ExpiredSignatureError:
         logger.warning("Data token has expired")
         raise SVATokenError("Data token has expired")
+    except jwt.InvalidSignatureError:
+        logger.error(
+            f"Data token signature verification failed. "
+            f"This usually means SVA_DATA_TOKEN_SECRET doesn't match the OAuth server's DATA_TOKEN_SECRET. "
+            f"Algorithm: {data_token_algorithm}, Secret length: {len(data_token_secret)}"
+        )
+        raise SVATokenError("Invalid data token: Signature verification failed")
     except jwt.InvalidTokenError as e:
         logger.error(f"Invalid data token: {str(e)}")
         raise SVATokenError(f"Invalid data token: {str(e)}")
@@ -150,6 +162,114 @@ def is_authenticated(session: SessionBase) -> bool:
     return bool(session.get('sva_oauth_access_token'))
 
 
+def get_blocks_data(session: SessionBase) -> Optional[Dict[str, Any]]:
+    """
+    Get blocks data from session by decoding the data_token.
+    
+    This is a convenience function that extracts the data_token from the session
+    and returns the decoded claims (identity blocks). This is the recommended
+    way to access user identity blocks in views.
+    
+    Args:
+        session: Django session object
+        
+    Returns:
+        Dictionary containing identity blocks (claims), or None if data_token
+        is not present in session
+        
+    Raises:
+        SVATokenError: If the data_token is invalid, expired, or has a bad signature
+        
+    Example:
+        ```python
+        from sva_oauth_client.utils import get_blocks_data
+        
+        @sva_oauth_required
+        def my_view(request):
+            blocks_data = get_blocks_data(request.session)
+            if blocks_data:
+                email = blocks_data.get('email')
+                name = blocks_data.get('name')
+        ```
+    """
+    data_token = session.get('sva_oauth_data_token')
+    if not data_token:
+        logger.debug("No data_token found in session")
+        return None
+    
+    try:
+        client = get_client_from_settings()
+        return client.get_blocks_data(data_token)
+    except SVATokenError:
+        # Re-raise token errors
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error getting blocks data: {e}", exc_info=True)
+        raise SVATokenError(f"Failed to get blocks data: {str(e)}")
+
+
+def get_userinfo(session: SessionBase) -> Optional[Dict[str, Any]]:
+    """
+    Get user information from session or fetch from OAuth provider.
+    
+    This function first checks if userinfo is cached in the session. If not,
+    it fetches userinfo from the OAuth provider using the access token and
+    caches it in the session for future requests.
+    
+    Args:
+        session: Django session object
+        
+    Returns:
+        Dictionary containing user information, or None if access token
+        is not available
+        
+    Raises:
+        SVATokenError: If the userinfo request fails
+        
+    Example:
+        ```python
+        from sva_oauth_client.utils import get_userinfo
+        
+        @sva_oauth_required
+        def my_view(request):
+            userinfo = get_userinfo(request.session)
+            if userinfo:
+                email = userinfo.get('email')
+                sub = userinfo.get('sub')
+        ```
+    """
+    # Check if userinfo is cached in session
+    cached_userinfo = session.get('sva_oauth_userinfo')
+    if cached_userinfo:
+        logger.debug("Returning cached userinfo from session")
+        return cached_userinfo
+    
+    # Get access token from session
+    access_token = session.get('sva_oauth_access_token')
+    if not access_token:
+        logger.debug("No access token found in session")
+        return None
+    
+    try:
+        # Fetch userinfo from OAuth provider
+        client = get_client_from_settings()
+        userinfo = client.get_userinfo(access_token)
+        
+        # Cache userinfo in session for future requests
+        session['sva_oauth_userinfo'] = userinfo
+        session.modified = True
+        
+        logger.debug("Userinfo fetched and cached in session")
+        return userinfo
+        
+    except SVATokenError:
+        # Re-raise token errors
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error getting userinfo: {e}", exc_info=True)
+        raise SVATokenError(f"Failed to get userinfo: {str(e)}")
+
+
 def clear_oauth_session(session: SessionBase) -> None:
     """
     Clear all OAuth-related data from session.
@@ -165,6 +285,8 @@ def clear_oauth_session(session: SessionBase) -> None:
         'sva_oauth_scope',
         'sva_oauth_code_verifier',
         'sva_oauth_state',
+        'sva_access_token_expiry',
+        'sva_remember_me',
     ]
     for key in keys_to_remove:
         session.pop(key, None)

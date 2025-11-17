@@ -34,6 +34,7 @@ def oauth_login(request):
         
         # Generate state and code verifier
         import secrets
+        import json
         state = secrets.token_urlsafe(32)
         code_verifier = None  # Let client generate it
         
@@ -45,8 +46,14 @@ def oauth_login(request):
             code_verifier=code_verifier
         )
         
+        # Store state in session for server-side validation (more secure)
+        request.session['sva_oauth_state'] = state
+        request.session.modified = True
+        
         # Return a page that stores PKCE data in localStorage and redirects
+        # Properly escape JavaScript strings using json.dumps to prevent XSS and breakage
         from django.http import HttpResponse
+        
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -56,11 +63,11 @@ def oauth_login(request):
         <body>
             <script>
                 // Store PKCE data in localStorage (temporary, only for OAuth flow)
-                localStorage.setItem('sva_oauth_code_verifier', '{code_verifier}');
-                localStorage.setItem('sva_oauth_state', '{state}');
+                localStorage.setItem('sva_oauth_code_verifier', {json.dumps(code_verifier)});
+                localStorage.setItem('sva_oauth_state', {json.dumps(state)});
                 
                 // Redirect to OAuth server
-                window.location.href = '{auth_url}';
+                window.location.href = {json.dumps(auth_url)};
             </script>
             <p>Redirecting to SVA...</p>
         </body>
@@ -77,8 +84,7 @@ def oauth_login(request):
 @require_http_methods(["GET"])
 def oauth_callback(request):
     """
-    Handle OAuth callback - SIMPLE: Get code_verifier from localStorage via JavaScript.
-    No session management needed!
+    Handle OAuth callback - Validate state server-side, then use localStorage for PKCE.
     
     URL: /oauth/callback/
     """
@@ -88,8 +94,13 @@ def oauth_callback(request):
     if error:
         error_description = request.GET.get('error_description', error)
         logger.error(f"OAuth error in callback: {error} - {error_description}")
+        # Clear any stored state on error
+        if 'sva_oauth_state' in request.session:
+            del request.session['sva_oauth_state']
+            request.session.modified = True
         # Return error page that shows message
         from django.http import HttpResponse
+        from django.utils.html import escape
         html = f"""
         <!DOCTYPE html>
         <html>
@@ -98,7 +109,7 @@ def oauth_callback(request):
         </head>
         <body>
             <h1>OAuth Error</h1>
-            <p>{error_description}</p>
+            <p>{escape(error_description)}</p>
             <a href="{getattr(settings, 'SVA_OAUTH_ERROR_REDIRECT', '/')}">Go Home</a>
         </body>
         </html>
@@ -108,10 +119,14 @@ def oauth_callback(request):
     code = request.GET.get('code')
     state = request.GET.get('state')
     
-    logger.info(f"Callback received - code: {'present' if code else 'missing'}, state: {state}")
+    logger.info(f"Callback received - code: {'present' if code else 'missing'}, state: {state[:20] if state else 'missing'}...")
     
     if not code:
         logger.warning("No authorization code in callback")
+        # Clear stored state
+        if 'sva_oauth_state' in request.session:
+            del request.session['sva_oauth_state']
+            request.session.modified = True
         from django.http import HttpResponse
         html = f"""
         <!DOCTYPE html>
@@ -128,12 +143,62 @@ def oauth_callback(request):
         """
         return HttpResponse(html)
     
-    # SIMPLE: Return a page that reads from localStorage and exchanges token
+    # CRITICAL: Validate state on server-side (more secure than client-side only)
+    expected_state = request.session.get('sva_oauth_state')
+    if not expected_state:
+        logger.error("No state found in session - possible session expired or cleared")
+        from django.http import HttpResponse
+        error_url = getattr(settings, 'SVA_OAUTH_ERROR_REDIRECT', '/')
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>OAuth Error</title>
+        </head>
+        <body>
+            <h1>OAuth Error</h1>
+            <p>Session expired. Please try signing in again.</p>
+            <a href="{error_url}">Go Home</a>
+        </body>
+        </html>
+        """
+        return HttpResponse(html)
+    
+    if state != expected_state:
+        logger.error(f"State mismatch! Expected: {expected_state[:20]}..., Got: {state[:20] if state else 'None'}...")
+        # Clear stored state on mismatch
+        del request.session['sva_oauth_state']
+        request.session.modified = True
+        from django.http import HttpResponse
+        error_url = getattr(settings, 'SVA_OAUTH_ERROR_REDIRECT', '/')
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>OAuth Error</title>
+        </head>
+        <body>
+            <h1>OAuth Error</h1>
+            <p>Invalid state parameter. Security check failed. Please try signing in again.</p>
+            <a href="{error_url}">Go Home</a>
+        </body>
+        </html>
+        """
+        return HttpResponse(html)
+    
+    # State is valid, clear it from session (one-time use)
+    del request.session['sva_oauth_state']
+    request.session.modified = True
+    logger.info("State validated successfully, proceeding with token exchange")
+    
+    # Return a page that reads from localStorage and exchanges token
     # Then stores tokens in session and redirects
     from django.http import HttpResponse
+    import json
     success_url = getattr(settings, 'SVA_OAUTH_SUCCESS_REDIRECT', '/dashboard/')
     error_url = getattr(settings, 'SVA_OAUTH_ERROR_REDIRECT', '/')
     
+    # Properly escape JavaScript strings using json.dumps
     html = f"""
     <!DOCTYPE html>
     <html>
@@ -143,21 +208,17 @@ def oauth_callback(request):
     <body>
         <p>Completing authentication...</p>
         <script>
-            // Get PKCE data from localStorage (simple!)
+            // Get PKCE data from localStorage
             const codeVerifier = localStorage.getItem('sva_oauth_code_verifier');
-            const expectedState = localStorage.getItem('sva_oauth_state');
-            const code = '{code}';
-            const state = '{state}';
+            const code = {json.dumps(code)};
+            const state = {json.dumps(state)};
             
-            // Verify state
-            if (state !== expectedState) {{
-                alert('Invalid state parameter. Security check failed.');
+            // State already validated server-side, but verify code_verifier exists
+            if (!codeVerifier) {{
+                alert('Missing code verifier. Please try signing in again.');
                 localStorage.removeItem('sva_oauth_code_verifier');
                 localStorage.removeItem('sva_oauth_state');
-                window.location.href = '{error_url}';
-            }} else if (!codeVerifier) {{
-                alert('Missing code verifier. Please try signing in again.');
-                window.location.href = '{error_url}';
+                window.location.href = {json.dumps(error_url)};
             }} else {{
                 // Exchange code for tokens via AJAX
                 fetch('/oauth/exchange/', {{
@@ -179,12 +240,12 @@ def oauth_callback(request):
                         localStorage.removeItem('sva_oauth_code_verifier');
                         localStorage.removeItem('sva_oauth_state');
                         // Redirect to success page
-                        window.location.href = '{success_url}';
+                        window.location.href = {json.dumps(success_url)};
                     }} else {{
                         alert('Token exchange failed: ' + (data.error || 'Unknown error'));
                         localStorage.removeItem('sva_oauth_code_verifier');
                         localStorage.removeItem('sva_oauth_state');
-                        window.location.href = '{error_url}';
+                        window.location.href = {json.dumps(error_url)};
                     }}
                 }})
                 .catch(error => {{
@@ -192,7 +253,7 @@ def oauth_callback(request):
                     alert('Failed to exchange token. Please try again.');
                     localStorage.removeItem('sva_oauth_code_verifier');
                     localStorage.removeItem('sva_oauth_state');
-                    window.location.href = '{error_url}';
+                    window.location.href = {json.dumps(error_url)};
                 }});
             }}
             

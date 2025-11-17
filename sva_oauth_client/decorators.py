@@ -15,6 +15,7 @@ def sva_oauth_required(view_func: Callable) -> Callable:
     Decorator to require SVA OAuth authentication.
     
     Redirects to login if user is not authenticated.
+    Also validates data_token and clears session if token is invalid.
     
     Usage:
         @sva_oauth_required
@@ -29,6 +30,18 @@ def sva_oauth_required(view_func: Callable) -> Callable:
             login_url = getattr(settings, 'SVA_OAUTH_LOGIN_URL', '/oauth/login/')
             messages.info(request, 'Please sign in with SVA to continue.')
             return redirect(login_url)
+        
+        # Validate data_token - if invalid, clear session and redirect to login
+        try:
+            get_sva_claims(request)
+        except SVATokenError as e:
+            # Token is invalid or expired - clear session and force re-login
+            from .utils import clear_oauth_session
+            clear_oauth_session(request.session)
+            login_url = getattr(settings, 'SVA_OAUTH_LOGIN_URL', '/oauth/login/')
+            messages.error(request, 'Your session has expired. Please sign in again.')
+            return redirect(login_url)
+        
         return view_func(request, *args, **kwargs)
     return wrapper
 
@@ -75,7 +88,9 @@ def sva_blocks_required(*required_claims: str):
                 
                 return view_func(request, *args, **kwargs)
             except SVATokenError as e:
-                # Token is invalid or expired - force logout
+                # Token is invalid or expired - clear session and force logout
+                from .utils import clear_oauth_session
+                clear_oauth_session(request.session)
                 messages.error(request, 'Your session has expired. Please sign in again.')
                 login_url = getattr(settings, 'SVA_OAUTH_LOGIN_URL', '/oauth/login/')
                 return redirect(login_url)

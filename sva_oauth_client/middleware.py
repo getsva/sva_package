@@ -69,7 +69,7 @@ class TokenRefreshMiddleware(MiddlewareMixin):
         
         try:
             # Import client here to avoid circular imports
-            from .client import get_client_from_settings
+            from .utils import get_client_from_settings
             
             # Get OAuth client instance
             client = get_client_from_settings()

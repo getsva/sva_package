@@ -10,7 +10,7 @@ long_description = readme_file.read_text(encoding="utf-8") if readme_file.exists
 
 setup(
     name="sva-oauth-client",
-    version="1.0.0",
+    version="1.0.1",
     author="SVA Team",
     author_email="support@getsva.com",
     description="Django package for integrating SVA (Secure Vault Authentication) OAuth provider",
