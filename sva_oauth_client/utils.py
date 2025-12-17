@@ -208,20 +208,26 @@ def get_blocks_data(session: SessionBase) -> Optional[Dict[str, Any]]:
         raise SVATokenError(f"Failed to get blocks data: {str(e)}")
 
 
-def get_userinfo(session: SessionBase) -> Optional[Dict[str, Any]]:
+def get_userinfo(session: SessionBase, force_refresh: bool = False) -> Optional[Dict[str, Any]]:
     """
     Get user information from session or fetch from OAuth provider.
     
-    This function first checks if userinfo is cached in the session. If not,
-    it fetches userinfo from the OAuth provider using the access token and
-    caches it in the session for future requests.
+    This function uses intelligent caching with sharing blob timestamp checking:
+    - Caches userinfo in session to avoid repeated API calls
+    - Checks blob timestamp to detect when user data was updated
+    - Only fetches from API when blob timestamp changes or cache is missing
+    - Supports force_refresh to bypass cache
     
     Args:
         session: Django session object
+        force_refresh: If True, bypass cache and fetch fresh data
         
     Returns:
         Dictionary containing user information, or None if access token
-        is not available
+        is not available. Includes:
+        - Standard OAuth userinfo fields
+        - blob_timestamp: When sharing blob was last updated
+        - blob_updated: Whether blob was updated since last check
         
     Raises:
         SVATokenError: If the userinfo request fails
@@ -236,24 +242,69 @@ def get_userinfo(session: SessionBase) -> Optional[Dict[str, Any]]:
             if userinfo:
                 email = userinfo.get('email')
                 sub = userinfo.get('sub')
+                # Check if data was updated
+                if userinfo.get('blob_updated'):
+                    print("User data was updated!")
         ```
     """
-    # Check if userinfo is cached in session
-    cached_userinfo = session.get('sva_oauth_userinfo')
-    if cached_userinfo:
-        logger.debug("Returning cached userinfo from session")
-        return cached_userinfo
-    
     # Get access token from session
     access_token = session.get('sva_oauth_access_token')
     if not access_token:
         logger.debug("No access token found in session")
         return None
     
+    # Get cached userinfo and blob timestamp
+    cached_userinfo = session.get('sva_oauth_userinfo')
+    cached_blob_timestamp = session.get('sva_oauth_blob_timestamp')
+    
+    # If we have cached data and not forcing refresh, check if we need to update
+    if cached_userinfo and not force_refresh:
+        # Check if blob timestamp is provided in cached data
+        cached_timestamp = cached_userinfo.get('blob_timestamp') or cached_blob_timestamp
+        
+        if cached_timestamp:
+            # Check with server if blob was updated
+            try:
+                client = get_client_from_settings()
+                userinfo = client.get_userinfo(access_token, check_blob_timestamp=cached_timestamp)
+                
+                # Check if blob was updated
+                new_timestamp = userinfo.get('blob_timestamp')
+                blob_updated = new_timestamp and new_timestamp != cached_timestamp
+                
+                if blob_updated:
+                    logger.info(f"Sharing blob updated: {cached_timestamp} -> {new_timestamp}")
+                    # Update cache with new data
+                    userinfo['blob_updated'] = True
+                    session['sva_oauth_userinfo'] = userinfo
+                    session['sva_oauth_blob_timestamp'] = new_timestamp
+                    session.modified = True
+                    return userinfo
+                else:
+                    # Blob hasn't changed, return cached data
+                    logger.debug("Sharing blob unchanged, returning cached userinfo")
+                    cached_userinfo['blob_updated'] = False
+                    return cached_userinfo
+            except SVATokenError:
+                # If timestamp check fails, fall through to full fetch
+                logger.warning("Blob timestamp check failed, fetching full userinfo")
+        else:
+            # No timestamp in cache, but we have cached data - return it
+            logger.debug("Returning cached userinfo (no timestamp check)")
+            return cached_userinfo
+    
+    # Fetch userinfo from OAuth provider (cache miss or force refresh)
     try:
-        # Fetch userinfo from OAuth provider
         client = get_client_from_settings()
         userinfo = client.get_userinfo(access_token)
+        
+        # Extract and store blob timestamp if available
+        blob_timestamp = userinfo.get('blob_timestamp')
+        if blob_timestamp:
+            session['sva_oauth_blob_timestamp'] = blob_timestamp
+            userinfo['blob_updated'] = True  # First fetch is always "updated"
+        else:
+            userinfo['blob_updated'] = False
         
         # Cache userinfo in session for future requests
         session['sva_oauth_userinfo'] = userinfo
@@ -272,12 +323,13 @@ def get_userinfo(session: SessionBase) -> Optional[Dict[str, Any]]:
 
 def clear_oauth_session(session: SessionBase) -> None:
     """
-    Clear all OAuth-related data from session.
+    Clear all OAuth-related data from session, including cached userinfo and blob timestamp.
     
     Args:
         session: Django session object
     """
     keys_to_remove = [
+        'sva_oauth_blob_timestamp',  # Clear blob timestamp cache
         'sva_oauth_access_token',
         'sva_oauth_refresh_token',
         'sva_oauth_data_token',

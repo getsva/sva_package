@@ -207,20 +207,32 @@ class SVAOAuthClient:
                     error_detail = e.response.text
             raise SVATokenError(f"Failed to refresh token: {error_detail}") from e
     
-    def get_userinfo(self, access_token: str) -> Dict[str, Any]:
+    def get_userinfo(self, access_token: str, check_blob_timestamp: Optional[str] = None) -> Dict[str, Any]:
         """
         Get user information from OAuth provider.
         
+        Supports sharing blob timestamp checking to avoid unnecessary API calls.
+        If check_blob_timestamp is provided and matches the server's blob timestamp,
+        the server can return a 304 Not Modified response (if implemented).
+        
         Args:
             access_token: OAuth access token
+            check_blob_timestamp: Optional timestamp to check if blob was updated
             
         Returns:
-            Dictionary containing user information
+            Dictionary containing user information, including:
+            - Standard OAuth userinfo fields (sub, email, name, etc.)
+            - blob_timestamp: Timestamp when sharing blob was last updated (if available)
+            - blob_updated: Boolean indicating if blob was updated since last check
             
         Raises:
             SVATokenError: If userinfo request fails
         """
         headers = {'Authorization': f'Bearer {access_token}'}
+        
+        # Add blob timestamp check header if provided
+        if check_blob_timestamp:
+            headers['X-Blob-Timestamp'] = check_blob_timestamp
         
         try:
             response = requests.get(self.userinfo_url, headers=headers, timeout=30)
