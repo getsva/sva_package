@@ -5,12 +5,14 @@ A professional Django package for integrating SVA (Secure Vault Authentication) 
 ## Features
 
 - ✅ **Complete OAuth 2.0 Flow**: Authorization Code Flow with PKCE support
+- ✅ **Simplified API**: New easy-to-use facade that reduces boilerplate code
 - ✅ **Easy Integration**: Simple decorators and utilities for quick setup
 - ✅ **Identity Blocks**: Retrieve all blocks data from consent screen
 - ✅ **Session Management**: Automatic token storage and management
 - ✅ **Error Handling**: Comprehensive error handling with user-friendly messages
 - ✅ **Django Integration**: Seamless integration with Django views and templates
 - ✅ **Type Hints**: Full type hint support for better IDE experience
+- ✅ **Backward Compatible**: All existing code continues to work
 
 ## Installation
 
@@ -75,7 +77,40 @@ urlpatterns = [
 
 ### 4. Use in Your Views
 
-#### Basic Usage
+#### ✨ Simplified API (Recommended)
+
+The new simplified API makes it much easier to work with SVA OAuth:
+
+```python
+from sva_oauth_client import get_sva
+from sva_oauth_client.decorators import sva_oauth_required
+
+@sva_oauth_required
+def my_view(request):
+    sva = get_sva(request)
+    
+    # Get all blocks
+    blocks = sva.get_blocks()
+    
+    # Get specific blocks easily
+    email = sva.get_block('email')
+    name = sva.get_block('name')
+    
+    # Check if block exists
+    has_phone = sva.has_block('phone')
+    
+    # Get userinfo
+    userinfo = sva.get_userinfo()
+    
+    return render(request, 'my_template.html', {
+        'blocks': blocks,
+        'email': email,
+        'name': name,
+        'userinfo': userinfo,
+    })
+```
+
+#### Traditional API (Still Supported)
 
 ```python
 from sva_oauth_client.decorators import sva_oauth_required
@@ -95,6 +130,28 @@ def my_view(request):
 
 #### Require Specific Blocks
 
+**Simplified API:**
+```python
+from sva_oauth_client import get_sva
+from sva_oauth_client.decorators import sva_blocks_required
+
+@sva_blocks_required('email', 'name', 'phone')
+def my_view(request):
+    sva = get_sva(request)
+    
+    # Blocks are guaranteed to be available
+    email = sva.get_block('email')
+    name = sva.get_block('name')
+    phone = sva.get_block('phone')
+    
+    return render(request, 'my_template.html', {
+        'email': email,
+        'name': name,
+        'phone': phone,
+    })
+```
+
+**Traditional API:**
 ```python
 from sva_oauth_client.decorators import sva_blocks_required
 from sva_oauth_client.utils import get_blocks_data
@@ -147,6 +204,53 @@ blocks_data = client.get_blocks_data(tokens['data_token'])
 
 ## API Reference
 
+### Simplified API (Recommended)
+
+#### `get_sva(request) -> SVA`
+
+Get SVA facade instance for easy access to all OAuth functionality.
+
+```python
+from sva_oauth_client import get_sva
+
+def my_view(request):
+    sva = get_sva(request)
+    
+    # Check authentication
+    if sva.is_authenticated():
+        # Get all blocks
+        blocks = sva.get_blocks()
+        
+        # Get specific block
+        email = sva.get_block('email')
+        
+        # Check if block exists
+        has_phone = sva.has_block('phone')
+        
+        # Get userinfo
+        userinfo = sva.get_userinfo()
+        
+        # Force refresh userinfo
+        fresh_userinfo = sva.refresh_userinfo()
+        
+        # Logout
+        sva.logout()
+```
+
+#### `SVA` Class Methods
+
+- `is_authenticated() -> bool`: Check if user is authenticated
+- `get_blocks() -> dict | None`: Get all identity blocks (claims)
+- `get_claims() -> dict | None`: Alias for `get_blocks()`
+- `get_block(name: str, default: Any = None) -> Any`: Get specific block value
+- `has_block(name: str) -> bool`: Check if block exists
+- `get_userinfo(force_refresh: bool = False) -> dict | None`: Get user information
+- `refresh_userinfo() -> dict | None`: Force refresh userinfo from provider
+- `get_access_token() -> str | None`: Get access token
+- `get_data_token() -> str | None`: Get data token
+- `logout() -> None`: Clear OAuth session
+- `get_client() -> SVAOAuthClient`: Get underlying OAuth client
+
 ### SVAOAuthClient
 
 Main OAuth client class.
@@ -197,13 +301,32 @@ def my_view(request):
     pass
 ```
 
-### Utility Functions
+### Configuration
+
+#### `SVAConfig`
+
+Centralized configuration manager with validation.
+
+```python
+from sva_oauth_client import SVAConfig
+
+# Get configuration values
+base_url = SVAConfig.get_base_url()
+client_id = SVAConfig.get_client_id()
+
+# Validate configuration
+is_valid, missing = SVAConfig.validate()
+if not is_valid:
+    print(f"Missing settings: {missing}")
+```
+
+### Utility Functions (Backward Compatible)
 
 #### `get_blocks_data(session) -> dict | None`
 
 Get blocks data from session.
 
-#### `get_userinfo(session) -> dict | None`
+#### `get_userinfo(session, force_refresh=False) -> dict | None`
 
 Get userinfo from session or fetch from OAuth provider.
 
@@ -222,6 +345,10 @@ Check if user is authenticated with SVA OAuth.
 #### `clear_oauth_session(session) -> None`
 
 Clear all OAuth-related data from session.
+
+#### `get_sva_claims(request) -> dict | None`
+
+Get claims from request (requires HttpRequest, not just session).
 
 ## Identity Blocks
 

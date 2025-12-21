@@ -228,6 +228,8 @@ class SVAOAuthClient:
         Raises:
             SVATokenError: If userinfo request fails
         """
+        # Ensure access token is properly trimmed (no extra whitespace)
+        access_token = access_token.strip() if access_token else ''
         headers = {'Authorization': f'Bearer {access_token}'}
         
         # Add blob timestamp check header if provided
@@ -238,6 +240,23 @@ class SVAOAuthClient:
             response = requests.get(self.userinfo_url, headers=headers, timeout=30)
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError as e:
+            # Handle HTTP errors (like 401, 403, etc.)
+            error_detail = str(e)
+            status_code = None
+            if hasattr(e, 'response') and e.response is not None:
+                status_code = e.response.status_code
+                try:
+                    error_json = e.response.json()
+                    error_detail = error_json.get('error_description', error_json.get('error', error_detail))
+                except:
+                    error_detail = e.response.text or str(e)
+            
+            # Include status code in error message for better debugging
+            if status_code:
+                raise SVATokenError(f"Failed to get userinfo ({status_code}): {error_detail}") from e
+            else:
+                raise SVATokenError(f"Failed to get userinfo: {error_detail}") from e
         except requests.exceptions.RequestException as e:
             error_detail = str(e)
             if hasattr(e, 'response') and e.response is not None:

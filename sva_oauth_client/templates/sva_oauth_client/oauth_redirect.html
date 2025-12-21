@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Redirecting to SVA...</title>
+</head>
+<body>
+    <script>
+        // Store PKCE data in localStorage
+        localStorage.setItem('sva_oauth_code_verifier', {{ code_verifier|safe }});
+        // Store state just in case, though server validates signature
+        localStorage.setItem('sva_oauth_state', {{ state|safe }});
+        
+        // Redirect to OAuth server
+        window.location.href = {{ auth_url|safe }};
+    </script>
+    <p>Redirecting to SVA...</p>
+</body>
+</html>
+

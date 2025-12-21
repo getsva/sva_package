@@ -6,10 +6,12 @@ providing a seamless user experience without requiring re-authentication.
 """
 
 import logging
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import datetime, timezone
 from django.utils.deprecation import MiddlewareMixin
 from django.shortcuts import redirect
-from django.conf import settings
+from .config import SVAConfig
+from .session_manager import SVASessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -36,36 +38,85 @@ class TokenRefreshMiddleware(MiddlewareMixin):
         Returns:
             None (continues request processing) or HttpResponse (redirect on failure)
         """
+        # Skip token refresh during OAuth flow (login, callback, exchange)
+        # These endpoints handle their own authentication flow
+        oauth_paths = ['/oauth/login/', '/oauth/callback/', '/oauth/exchange/', '/oauth/logout/']
+        if any(request.path.startswith(path) for path in oauth_paths):
+            return None
+        
+        session_mgr = SVASessionManager(request.session)
+        
         # Only run for requests that have tokens in session
-        if 'sva_oauth_access_token' not in request.session:
+        if not session_mgr.is_authenticated():
             return None
         
         # Get token expiry from session
-        access_token_expiry = request.session.get('sva_access_token_expiry')
+        access_token_expiry = session_mgr.get_token_expiry()
         if not access_token_expiry:
             # No expiry stored, skip refresh check
             logger.debug("No token expiry timestamp in session, skipping refresh check")
             return None
         
-        # Check if the token is close to expiring (within the next 60 seconds)
+        # Check if the token is close to expiring (within the next 60 seconds) or already expired
         expiry_datetime = datetime.fromtimestamp(access_token_expiry, tz=timezone.utc)
         now = datetime.now(timezone.utc)
         time_until_expiry = (expiry_datetime - now).total_seconds()
         
-        # Only refresh if token expires within 60 seconds
+        # Refresh if token expires within 60 seconds OR has already expired
         if time_until_expiry > 60:
             # Token is still valid, no refresh needed
             return None
         
-        logger.info(f"Access token expiring soon ({time_until_expiry:.0f} seconds), attempting refresh...")
+        if time_until_expiry <= 0:
+            logger.info(f"Access token has expired ({abs(time_until_expiry):.0f} seconds ago), attempting refresh...")
+        else:
+            logger.info(f"Access token expiring soon ({time_until_expiry:.0f} seconds), attempting refresh...")
         
         # Get refresh token from session
-        refresh_token = request.session.get('sva_oauth_refresh_token')
+        refresh_token = session_mgr.get_refresh_token()
         if not refresh_token:
             # No refresh token available, force logout
             logger.warning("No refresh token available, forcing logout")
-            self._force_logout(request)
-            return redirect(getattr(settings, 'SVA_OAUTH_LOGOUT_REDIRECT', '/'))
+            session_mgr.clear()
+            return redirect(SVAConfig.get_logout_redirect())
+        
+        # Rate limiting: Check if we've attempted too many refreshes recently
+        refresh_attempts = request.session.get('_token_refresh_attempts', 0)
+        last_refresh_attempt = request.session.get('_token_refresh_last_attempt', 0)
+        current_time = time.time()
+        
+        # Reset counter if last attempt was more than 5 minutes ago
+        if current_time - last_refresh_attempt > 300:
+            refresh_attempts = 0
+        
+        # Rate limit: max 5 refresh attempts per 5 minutes
+        if refresh_attempts >= 5:
+            logger.warning(f"Token refresh rate limit exceeded ({refresh_attempts} attempts)")
+            session_mgr.clear()
+            next_url = request.get_full_path()
+            login_url = SVAConfig.get_login_url()
+            if next_url and next_url != login_url and not next_url.startswith('/oauth/'):
+                from django.utils.http import urlencode
+                redirect_url = f"{login_url}?{urlencode({'next': next_url})}"
+            else:
+                redirect_url = SVAConfig.get_logout_redirect()
+            return redirect(redirect_url)
+        
+        # Check if refresh is already in progress (race condition prevention)
+        refresh_in_progress = request.session.get('_token_refresh_in_progress', False)
+        refresh_lock_time = request.session.get('_token_refresh_lock_time', 0)
+        
+        # If lock exists and is less than 10 seconds old, wait for it to complete
+        if refresh_in_progress and (current_time - refresh_lock_time) < 10:
+            logger.debug("Token refresh already in progress, skipping duplicate refresh")
+            return None
+        
+        # Set refresh lock
+        request.session['_token_refresh_in_progress'] = True
+        request.session['_token_refresh_lock_time'] = current_time
+        request.session['_token_refresh_attempts'] = refresh_attempts + 1
+        request.session['_token_refresh_last_attempt'] = current_time
+        request.session.modified = True
         
         try:
             # Import client here to avoid circular imports
@@ -79,58 +130,56 @@ class TokenRefreshMiddleware(MiddlewareMixin):
             new_token_response = client.refresh_access_token(refresh_token)
             
             # Update the session with the new tokens
-            request.session['sva_oauth_access_token'] = new_token_response.get('access_token')
+            session_mgr.store_tokens(new_token_response)
             
             # The refresh token might also be rotated, so update it if it's in the response
             if 'refresh_token' in new_token_response:
-                request.session['sva_oauth_refresh_token'] = new_token_response['refresh_token']
                 logger.info("Refresh token rotated and updated")
             
-            # Update data_token if provided
-            if 'data_token' in new_token_response:
-                request.session['sva_oauth_data_token'] = new_token_response['data_token']
-            
-            # Update the expiry timestamp
-            new_expires_in = new_token_response.get('expires_in', 3600)  # Default to 1 hour
-            new_expiry_timestamp = datetime.now(timezone.utc).timestamp() + new_expires_in
-            request.session['sva_access_token_expiry'] = new_expiry_timestamp
-            
-            # Preserve the session expiry setting (Remember Me)
-            # Don't reset it, just update the token expiry timestamp
-            
-            # Mark session as modified
-            request.session.modified = True
-            
+            new_expires_in = new_token_response.get('expires_in', 3600)
             logger.info(f"Token refreshed successfully. New expiry in {new_expires_in} seconds")
             
+            # Reset refresh attempts on success
+            request.session['_token_refresh_attempts'] = 0
+            
         except Exception as e:
-            # If refresh fails (e.g., refresh token is revoked or expired), force logout
+            # Check if this is a revoked token error
+            error_msg = str(e).lower()
+            is_revoked = any(keyword in error_msg for keyword in ['revoked', 'invalid_grant', 'invalid_token'])
+            
+            if is_revoked:
+                logger.warning(f"Refresh token appears to be revoked: {e}")
+                session_mgr.clear()
+                next_url = request.get_full_path()
+                login_url = SVAConfig.get_login_url()
+                if next_url and next_url != login_url and not next_url.startswith('/oauth/'):
+                    from django.utils.http import urlencode
+                    redirect_url = f"{login_url}?{urlencode({'next': next_url})}"
+                else:
+                    redirect_url = SVAConfig.get_logout_redirect()
+                return redirect(redirect_url)
+            
+            # If refresh fails (e.g., network error), log but don't clear session yet
+            # Allow a few retries before giving up
             logger.error(f"Token refresh failed: {e}", exc_info=True)
-            self._force_logout(request)
-            return redirect(getattr(settings, 'SVA_OAUTH_LOGOUT_REDIRECT', '/'))
+            
+            # If we've tried multiple times, give up and force re-login
+            if refresh_attempts >= 3:
+                logger.error("Token refresh failed multiple times, forcing logout")
+                session_mgr.clear()
+                next_url = request.get_full_path()
+                login_url = SVAConfig.get_login_url()
+                if next_url and next_url != login_url and not next_url.startswith('/oauth/'):
+                    from django.utils.http import urlencode
+                    redirect_url = f"{login_url}?{urlencode({'next': next_url})}"
+                else:
+                    redirect_url = SVAConfig.get_logout_redirect()
+                return redirect(redirect_url)
+        finally:
+            # Always clear the refresh lock
+            request.session.pop('_token_refresh_in_progress', None)
+            request.session.pop('_token_refresh_lock_time', None)
+            request.session.modified = True
         
         return None
-    
-    def _force_logout(self, request):
-        """
-        Clear all OAuth-related session data.
-        
-        Args:
-            request: Django HttpRequest object
-        """
-        oauth_keys = [
-            'sva_oauth_access_token',
-            'sva_oauth_refresh_token',
-            'sva_oauth_data_token',
-            'sva_oauth_scope',
-            'sva_access_token_expiry',
-            'sva_remember_me',
-        ]
-        
-        for key in oauth_keys:
-            if key in request.session:
-                del request.session[key]
-        
-        request.session.modified = True
-        logger.info("OAuth session data cleared due to refresh failure")
 

@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Completing Authentication...</title>
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            text-align: center;
+            padding: 40px;
+            color: #333;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .success-message {
+            background: white;
+            padding: 40px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+            max-width: 400px;
+            width: 90%;
+        }
+        .icon { font-size: 48px; margin-bottom: 20px; }
+        h1 { margin: 0 0 10px 0; font-size: 24px; }
+        p { color: #666; margin-bottom: 30px; }
+        .btn {
+            background: #00D09C; color: white; border: none; padding: 12px 24px;
+            border-radius: 6px; font-size: 16px; cursor: pointer; font-weight: 500;
+            text-decoration: none; display: inline-block;
+        }
+        .btn:hover { opacity: 0.9; }
+    </style>
+</head>
+<body>
+    <p id="status">Completing authentication...</p>
+    <script>
+        const code = {{ code|safe }};
+        const state = {{ state|safe }};
+        const codeVerifier = localStorage.getItem('sva_oauth_code_verifier');
+        const successUrl = {{ success_url|safe }};
+        const errorUrl = {{ error_url|safe }};
+        
+        if (!codeVerifier) {
+            alert('Browser session lost (missing code verifier). Please try again.');
+            window.location.href = errorUrl;
+        } else {
+            fetch('/oauth/exchange/', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-CSRFToken': getCookie('csrftoken') || ''
+                },
+                body: JSON.stringify({ code: code, state: state, code_verifier: codeVerifier })
+            })
+            .then(r => r.json())
+            .then(data => {
+                localStorage.removeItem('sva_oauth_code_verifier');
+                localStorage.removeItem('sva_oauth_state');
+                
+                if (data.success) {
+                    // Use next_url if provided, otherwise use default successUrl
+                    const redirectUrl = data.next_url || successUrl;
+                    
+                    const isPopupByName = window.name === 'sva_login_popup';
+                    const hasOpener = window.opener && window.opener !== window;
+                    // Fallback: If window is small, assume it's a popup
+                    const isSmallWindow = window.innerWidth < 800 && window.innerHeight < 900;
+                    
+                    // DECISION LOGIC
+                    if (hasOpener) {
+                        // Ideally, notify parent and close
+                        try {
+                            window.opener.postMessage('sva_login_success', '*');
+                            window.close();
+                        } catch (e) {
+                            console.error("Failed to post message to opener:", e);
+                            showSuccessUI(redirectUrl);
+                        }
+                    } else if (isPopupByName || isSmallWindow) {
+                        // Orphaned popup or small window - DO NOT REDIRECT
+                        showSuccessUI(redirectUrl);
+                    } else {
+                        // Main window - Redirect
+                        window.location.href = redirectUrl;
+                    }
+                } else {
+                    alert('Login failed: ' + (data.error || 'Unknown error'));
+                    window.location.href = errorUrl;
+                }
+            })
+            .catch(e => {
+                console.error(e);
+                alert('Login error.');
+                window.location.href = errorUrl;
+            });
+        }
+        
+        function showSuccessUI(redirectUrl) {
+            const url = redirectUrl || successUrl;
+            document.body.innerHTML = `
+                <div class="success-message">
+                    <div class="icon">✅</div>
+                    <h1>Sign in successful</h1>
+                    <p>You can now close this window.</p>
+                    <button onclick="window.close()" class="btn">Close Window</button>
+                    <br><br>
+                    <a href="${url}" target="_blank" style="color: #666; font-size: 12px;">Go to Dashboard</a>
+                </div>
+            `;
+        }
+        
+        function getCookie(name) {
+            if (!document.cookie) return null;
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+        }
+    </script>
+</body>
+</html>
+

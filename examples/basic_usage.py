@@ -1,5 +1,8 @@
 """
 Basic usage example for sva-oauth-client package.
+
+This file demonstrates both the new simplified API and the
+backward-compatible utility functions.
 """
 from django.shortcuts import render, redirect
 from django.contrib import messages
@@ -10,6 +13,8 @@ from sva_oauth_client.utils import (
     is_authenticated,
     clear_oauth_session
 )
+# New simplified API (recommended)
+from sva_oauth_client import get_sva
 
 
 # Example 1: Simple protected view
