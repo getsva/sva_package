@@ -146,3 +146,7 @@ def custom_operation(request):
     return render(request, 'custom.html', {})
 
 
+
+
+
+
