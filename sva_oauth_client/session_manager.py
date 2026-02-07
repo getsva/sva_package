@@ -84,7 +84,9 @@ class SVASessionManager:
     
     def get_data_token(self) -> Optional[str]:
         """Get data token from session."""
-        return self.session.get(self.DATA_TOKEN_KEY)
+        data_token = self.session.get(self.DATA_TOKEN_KEY)
+        print(f"[SESSION DEBUG] get_data_token: data_token present={bool(data_token)}, len={len(data_token) if data_token else 0}")
+        return data_token
     
     def get_claims(self, filter_by_approved_scopes: bool = True) -> Optional[Dict[str, Any]]:
         """
@@ -101,8 +103,10 @@ class SVASessionManager:
         """
         data_token = self.get_data_token()
         if not data_token:
-            logger.debug("No data_token found in session")
+            print("[SESSION DEBUG] get_claims: No data_token found in session!")
             return None
+        
+        print(f"[SESSION DEBUG] get_claims: Found data_token, length={len(data_token)}")
         
         try:
             client = SVAOAuthClient(
@@ -115,19 +119,23 @@ class SVASessionManager:
                 scopes=SVAConfig.get_scopes()
             )
             decoded = client.decode_data_token(data_token)
+            print(f"[SESSION DEBUG] Decoded data_token: {decoded}")
             all_claims = decoded.get('claims', {})
+            print(f"[SESSION DEBUG] all_claims from decoded token: {all_claims}")
             
             # Filter claims by approved scopes if requested
             if filter_by_approved_scopes:
                 # Get approved scopes from session (stored from userinfo) or use token scope as fallback
                 approved_scopes = self.session.get(self.APPROVED_SCOPES_KEY)
+                print(f"[SESSION DEBUG] approved_scopes from session: {approved_scopes}")
                 if not approved_scopes:
                     # Fallback to token scope (what was granted)
                     scope_text = self.session.get(self.SCOPE_KEY, '')
                     approved_scopes = set(scope_text.split()) if scope_text else set()
-                    logger.debug(f"No approved_scopes in session, using token scope: {approved_scopes}")
+                    print(f"[SESSION DEBUG] No approved_scopes in session, using token scope: {approved_scopes}, scope_text={scope_text}")
                 else:
                     approved_scopes = set(approved_scopes) if isinstance(approved_scopes, list) else set(approved_scopes.split())
+                    print(f"[SESSION DEBUG] Using approved_scopes: {approved_scopes}")
                 
                 # Filter claims to only include approved scopes
                 # Always include 'sub' if present (standard OAuth field)
@@ -176,7 +184,7 @@ class SVASessionManager:
                     if key in allowed_claim_keys or key == 'sub':
                         filtered_claims[key] = value
                 
-                logger.debug(f"Filtered claims from {len(all_claims)} to {len(filtered_claims)} based on approved scopes: {approved_scopes}")
+                print(f"[SESSION DEBUG] Filtered claims from {len(all_claims)} to {len(filtered_claims)} - allowed_keys={allowed_claim_keys}, filtered_claims={filtered_claims}")
                 return filtered_claims
             
             return all_claims
